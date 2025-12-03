@@ -1,0 +1,851 @@
+---
+title: "ADA_FINAL_PROJECT"
+author: "Bethel Alemayehu"
+date: "`r Sys.Date()`"
+output: html_document
+---
+#instal Packages 
+```{r, echo = TRUE, message = FALSE, warning = FALSE}
+# install.packages("pacman")
+
+pacman::p_load(
+  readr,        # read_csv()
+  tidyverse,    # dplyr, ggplot2, forcats, etc.
+  nnet,         # multinomial logistic regression
+  MASS,         # extra models
+  funModeling,  # describe(), etc.
+  brant,        # Brant test
+  broom,        # tidy() model output
+  odds.n.ends,  # odds ratios, CIs
+  janitor,      # clean_names()
+  gtsummary,    # descriptive tables
+  gt            # table rendering/formatting
+)
+
+```
+#Data Import
+```{r import_data, echo = TRUE, message = FALSE, warning = FALSE}
+bc_raw <- readr::read_csv("D:/Downloads/ADA.csv")
+bc <- bc_raw %>% janitor::clean_names()
+head(bc)
+
+```
+#Recode stage at diagnosis
+```{r Recode summary stage into 3 categories}
+bc <- bc %>%
+  mutate(
+    stage3 = case_when(
+      combined_summary_stage_with_expanded_regional_codes_2004 == 
+        "Localized only" ~ "Localized",
+      combined_summary_stage_with_expanded_regional_codes_2004 %in% c(
+        "Regional by direct extension only",
+        "Regional lymph nodes involved only",
+        "Regional by both direct extension and lymph node involvement"
+      ) ~ "Regional",
+      combined_summary_stage_with_expanded_regional_codes_2004 ==
+        "Distant site(s)/node(s) involved" ~ "Distant",
+      TRUE ~ NA_character_
+    ),
+    stage3 = factor(stage3,
+                    levels = c("Localized","Regional","Distant"))
+  )
+
+bc %>% count(stage3, useNA = "ifany")
+
+```
+#Recode Race and Ethnicity
+```{r}
+bc <- bc %>%
+  mutate(
+    race_eth = factor(
+      race_and_origin_recode_nhw_nhb_nhaian_nhapi_hispanic,
+      levels = c("Non-Hispanic White",
+                 "Non-Hispanic Black",
+                 "Non-Hispanic American Indian/Alaska Native",
+                 "Non-Hispanic Asian or Pacific Islander",
+                 "Hispanic (All Races)")
+    )
+  )
+
+bc %>% count(race_eth)
+
+```
+#Selecting only those with microscopic confirmation 
+```{r}
+# Flag microscopic confirmation
+bc <- bc %>%
+  mutate(
+    micro_confirm = diagnostic_confirmation %in% c(
+      "Microscopically confirmed",
+      "Positive histology",
+      "Positive exfoliative cytology, no positive histology",
+      "Pos hist AND immunophenotyping AND/OR pos genetic studies",
+      "Positive microscopic confirm, method not specified"
+    )
+  )
+
+bc %>%
+  summarise(
+    n_before_diag_filter = n(),
+    n_micro_confirm      = sum(micro_confirm, na.rm = TRUE)
+  )
+
+# Keep only microscopically confirmed cases
+bc <- bc %>%
+  filter(micro_confirm)
+
+```
+#Treat age as cat
+```{r}
+bc <- bc %>%
+  mutate(
+    year_dx = factor(year_of_diagnosis)
+  )
+
+```
+#Recode Age
+```{r CLEANING AGE}
+bc %>%
+  summarise(
+    min_age = min(age_recode_with_single_ages_and_85, na.rm = TRUE),
+    max_age = max(age_recode_with_single_ages_and_85, na.rm = TRUE)
+  )
+
+## 1. Age ≥18 and age groups
+# Make numeric age
+bc <- bc %>%
+  mutate(
+    age_num = readr::parse_number(age_recode_with_single_ages_and_85)
+  )
+
+# How many under 18 / 18+ / missing?
+age_exclusion <- bc %>%
+  summarise(
+    n_total     = n(),
+    n_under18   = sum(age_num < 18, na.rm = TRUE),
+    n_18plus    = sum(age_num >= 18, na.rm = TRUE),
+    n_age_missing = sum(is.na(age_num))
+  )
+age_exclusion
+
+# Keep only 18+
+bc <- bc %>%
+  filter(age_num >= 18)
+
+# Create age groups - CLEANED (no en dashes)
+bc <- bc %>%
+  mutate(
+    age_group = case_when(
+      age_num >= 18 & age_num <= 39 ~ "18-39",
+      age_num >= 40 & age_num <= 49 ~ "40-49",
+      age_num >= 50 & age_num <= 64 ~ "50-64",
+      age_num >= 65                 ~ "65 plus",
+      TRUE ~ NA_character_
+    ),
+    age_group = factor(age_group,
+                       levels = c("18-39","40-49","50-64","65 plus"))
+  )
+
+bc %>% count(age_group)
+```
+#Recode Grade
+```{r grade_clean}
+# 1. Look at the raw SEER grade codes (optional sanity check)
+bc %>%
+  count(derived_summary_grade_2018_2018, sort = TRUE)
+
+# 2. Create raw grade vars, flag in-situ, and build grade_cat - CLEANED
+bc <- bc %>%
+  mutate(
+    grade_raw = derived_summary_grade_2018_2018,
+
+    # In-situ nuclear grade codes (to EXCLUDE)
+    grade_insitu = grade_raw %in% c("L", "M", "H"),
+
+    # Map SEER codes to analytic grade categories - NO SPECIAL CHARACTERS
+    grade_cat = case_when(
+      grade_raw %in% c("1", "A")        ~ "Low Grade",
+      grade_raw %in% c("2", "B")        ~ "Intermediate Grade",
+      grade_raw %in% c("3", "C", "D")   ~ "High Grade",
+      grade_raw %in% c("9")             ~ "Unknown",
+      TRUE                              ~ "Other Not graded"
+    ),
+    grade_cat = factor(
+      grade_cat,
+      levels = c(
+        "Low Grade",
+        "Intermediate Grade",
+        "High Grade",
+        "Unknown",
+        "Other Not graded"
+      )
+    )
+  )
+
+# 3. See how many are in-situ vs. others BEFORE dropping (optional)
+bc %>%
+  count(grade_raw, grade_insitu, grade_cat, sort = TRUE)
+
+# 4. Drop in-situ cases (L / M / H) ONLY
+grade_exclusion <- bc %>%
+  summarise(
+    n_before_grade_filter = n(),
+    n_insitu_grade        = sum(grade_insitu, na.rm = TRUE)
+  )
+grade_exclusion
+
+bc <- bc %>%
+  filter(!grade_insitu)
+
+# 5. Final check: keep Unknown as its own category, drop empty levels
+bc <- bc %>%
+  mutate(
+    grade_cat = forcats::fct_drop(grade_cat)
+  )
+
+# Double-check what we have now
+bc %>%
+  count(grade_cat, useNA = "ifany")
+
+```
+#Recode hormone status
+```{r hormone_filter}
+
+# Check distinct values (helpful sanity check)
+bc %>% count(estrogen_receptor_summary_2018, sort = TRUE)
+bc %>% count(progesterone_receptor_summary_2018, sort = TRUE)
+bc %>% count(her2_overall_summary_recode_2018, sort = TRUE)
+
+# Recode to clean ER/PR/HER2 variables - CLEANED (no slashes)
+bc <- bc %>%
+  mutate(
+    er_status = case_when(
+      estrogen_receptor_summary_2018 == "ER positive" ~ "ER Positive",
+      estrogen_receptor_summary_2018 == "ER negative" ~ "ER Negative",
+      TRUE ~ NA_character_
+    ),
+    pr_status = case_when(
+      progesterone_receptor_summary_2018 == "PR positive" ~ "PR Positive",
+      progesterone_receptor_summary_2018 == "PR negative" ~ "PR Negative",
+      TRUE ~ NA_character_
+    ),
+    her2_status = case_when(
+      her2_overall_summary_recode_2018 == "HER2 positive" ~ "HER2 Positive",
+      her2_overall_summary_recode_2018 == "HER2 negative; equivocal" ~ "HER2 Negative or Equivocal",
+      TRUE ~ NA_character_
+    )
+  )
+
+# How many will be dropped for missing receptor info?
+hormone_exclusion <- bc %>%
+  summarise(
+    n_before_hr_filter = n(),
+    n_missing_hr = sum(
+      is.na(er_status) | is.na(pr_status) | is.na(her2_status)
+    )
+  )
+hormone_exclusion
+
+bc <- bc %>%
+  filter(
+    !is.na(er_status),
+    !is.na(pr_status),
+    !is.na(her2_status)
+  )
+
+# Make them factors with nice reference levels
+bc <- bc %>%
+  mutate(
+    er_status   = factor(er_status,   levels = c("ER Negative", "ER Positive")),
+    pr_status   = factor(pr_status,   levels = c("PR Negative", "PR Positive")),
+    her2_status = factor(her2_status, levels = c("HER2 Negative or Equivocal", "HER2 Positive"))
+  )
+
+bc %>% count(er_status)
+bc %>% count(pr_status)
+bc %>% count(her2_status)
+```
+#Recode Urban vs Rural 
+```{r recode_urban_rural}
+bc <- bc %>%
+  mutate(
+    rural_urban = case_when(
+      rural_urban_continuum_code %in% c(
+        "Counties in metropolitan areas ge 1 million pop",
+        "Counties in metropolitan areas of 250,000 to 1 million pop",
+        "Counties in metropolitan areas of lt 250 thousand pop"
+      ) ~ "Urban",
+      rural_urban_continuum_code %in% c(
+        "Nonmetropolitan counties adjacent to a metropolitan area",
+        "Nonmetropolitan counties not adjacent to a metropolitan area"
+      ) ~ "Rural",
+      TRUE ~ "Unknown"   # instead of NA
+    ),
+    rural_urban = factor(rural_urban,
+                         levels = c("Urban", "Rural", "Unknown"))
+  )
+
+bc %>% count(rural_urban)
+
+
+```
+#Recode Income
+```{r CLEANING_HOUSEHOLD_INCOME}
+bc <- bc %>%
+  mutate(
+    income_cat = case_when(
+      median_household_income_inflation_adj_to_2023 %in% c(
+        "< $40,000",
+        "$40,000 - $44,999",
+        "$45,000 - $49,999",
+        "$50,000 - $54,999",
+        "$55,000 - $59,999",
+        "$60,000 - $64,999",
+        "$65,000 - $69,999",
+        "$70,000 - $74,999",
+        "$75,000 - $79,999"
+      ) ~ "Less than 80,000",
+      median_household_income_inflation_adj_to_2023 %in% c(
+        "$80,000 - $84,999",
+        "$85,000 - $89,999",
+        "$90,000 - $94,999",
+        "$95,000 - $99,999",
+        "$100,000 - $109,999",
+        "$110,000 - $119,999",
+        "$120,000+"
+      ) ~ "80,000 or more",
+      TRUE ~ "Unknown"
+    ),
+    income_cat = factor(
+      income_cat,
+      levels = c("Less than 80,000", "80,000 or more", "Unknown")
+    )
+  )
+
+bc %>% count(income_cat)
+
+```
+#Recode Marital status 
+```{r Cleaning MARITAL STATUS}
+bc <- bc %>%
+  mutate(
+    marital_cat = case_when(
+      marital_status_at_diagnosis == "Married (including common law)" ~
+        "Married or Partnered",
+      marital_status_at_diagnosis %in% c(
+        "Single (never married)",
+        "Separated",
+        "Divorced",
+        "Widowed"
+      ) ~ "Not Married",
+      marital_status_at_diagnosis %in% c(
+        "Unmarried or Domestic Partner",
+        "Unknown"
+      ) ~ "Unknown",
+      TRUE ~ NA_character_
+    ),
+    marital_cat = factor(
+      marital_cat,
+      levels = c("Married or Partnered",
+                 "Not Married",
+                 "Unknown")
+    )
+  )
+
+bc %>% count(marital_cat, useNA = "ifany")
+```
+
+```{r}
+bc_analysis <- bc
+```
+#Descriptives table
+```{r table1, echo=TRUE, message=FALSE, warning=FALSE}
+table1 <-
+  bc_analysis %>%
+  select(
+    stage3,
+    year_dx,  
+    race_eth,
+    age_group,
+    grade_cat,
+    er_status,
+    pr_status,
+    her2_status,
+    income_cat,
+    rural_urban,
+    marital_cat
+  ) %>%
+  tbl_summary(
+    by      = stage3,
+    missing = "no",   # Unknowns are coded as categories, not NA
+    label = list(
+      year_dx     ~ "Year at Diagnosis",
+      race_eth    ~ "Race and Ethnicity",
+      age_group   ~ "Age Group (years)",
+      grade_cat   ~ "Tumor Grade",
+      er_status   ~ "ER Status",
+      pr_status   ~ "PR Status",
+      her2_status ~ "HER2 Status",
+      income_cat  ~ "Household Income",
+      rural_urban ~ "Urban–Rural Status",
+      marital_cat ~ "Marital Status"
+    ),
+    statistic = all_categorical() ~ "{n} ({p}%)"
+  ) %>%
+  modify_caption("**Table 1. Characteristics of Breast cancer Patients by Stage at Diagnosis**") %>%
+  modify_header(
+    label ~ "**Characteristic**",
+    all_stat_cols() ~ "**{level}**"   # column headers: Localized, Regional, Distant
+  ) %>%
+  modify_spanning_header(all_stat_cols() ~ "**Stage at Diagnosis**") %>%
+  bold_labels()
+
+table1
+
+library(gt)
+
+# Make sure the folder exists
+output_folder <- "C:/Users/Admin/Desktop/ADA"
+
+if (!dir.exists(output_folder)) {
+  dir.create(output_folder, recursive = TRUE)
+}
+
+# Path for HTML file
+file_path <- file.path(output_folder, "table1.html")
+
+# Save table as HTML instead of PNG
+as_gt(table1) %>%
+  gtsave(filename = file_path)
+
+```
+#Set references 
+
+```{r Set reference categories for modeling}
+bc_model <- bc_analysis %>%
+  mutate(
+    stage3      = forcats::fct_relevel(stage3, "Localized"),
+    race_eth    = forcats::fct_relevel(race_eth, "Non-Hispanic White"),
+    age_group   = forcats::fct_relevel(age_group, "18-39"),
+    grade_cat   = forcats::fct_relevel(grade_cat, "Low Grade"),
+    er_status   = forcats::fct_relevel(er_status, "ER Negative"),
+    pr_status   = forcats::fct_relevel(pr_status, "PR Negative"),
+    her2_status = forcats::fct_relevel(her2_status, "HER2 Negative or Equivocal"),
+    income_cat  = forcats::fct_relevel(income_cat, "Less than 80,000"),
+    rural_urban = forcats::fct_relevel(rural_urban, "Urban"),
+    marital_cat = forcats::fct_relevel(marital_cat, "Married or Partnered")
+  )
+
+```
+
+#Baic Fit (with out adjusting)
+```{r basic_mlr_fit, message=FALSE, warning=FALSE}
+
+# Basic multinomial model: outcome = stage3, predictor = race_eth
+fit_basic <- multinom(stage3 ~ race_eth, data = bc_model)
+
+fit_basic   # shows coefficients on log-RR scale
+
+```
+
+```{r basic_mlr_logRR, message=FALSE, warning=FALSE}
+#Tidy basic model (log relative risks)
+basic_log <- tidy(
+  fit_basic,
+  exponentiate = FALSE,  # keep log-RRs
+  conf.int     = TRUE
+)
+
+basic_log
+
+```
+
+```{r basic_mlr_RRR, message=FALSE, warning=FALSE}
+#  Tidy basic model as **RRRs*
+basic_rrr <- tidy(
+  fit_basic,
+  exponentiate = TRUE,   # convert to Relative Risk Ratios
+  conf.int     = TRUE
+)
+
+basic_rrr
+```
+
+```{r basic_mlr_RRR_pretty, message=FALSE, warning=FALSE}
+library(knitr)
+library(kableExtra)
+
+basic_rrr %>%
+  kable(
+    digits  = 2,
+    caption = "Basic multinomial model: Stage at diagnosis ~ Race and ethnicity (RRRs)"
+  ) %>%
+  kable_styling(full_width = FALSE)
+
+```
+```{r full_mlr_fit, message=FALSE, warning=FALSE}
+library(nnet)   # for multinom()
+library(broom)  # for tidy()
+
+# Full multinomial model: outcome = stage3, all predictors
+fit_full <- multinom(
+  stage3 ~ race_eth + age_group + grade_cat +
+    er_status + pr_status + her2_status +
+    income_cat + rural_urban + marital_cat + year_dx,
+  data = bc_model
+)
+
+fit_full   # shows coefficients on log-RR scale
+```
+# Full adjusted model 
+```{r full_mlr_logRR, message=FALSE, warning=FALSE}
+# Tidy full model (log relative risks)
+full_log <- tidy(
+  fit_full,
+  exponentiate = FALSE,  # keep log-RRs
+  conf.int     = TRUE
+)
+
+full_log
+```
+
+```{r full_mlr_RRR, message=FALSE, warning=FALSE}
+# Tidy full model as RRRs
+full_rrr <- tidy(
+  fit_full,
+  exponentiate = TRUE,   # convert to Relative Risk Ratios
+  conf.int     = TRUE
+)
+
+full_rrr
+```
+
+```{r full_mlr_RRR_pretty, message=FALSE, warning=FALSE}
+# Display all results
+full_rrr %>%
+  filter(term != "(Intercept)") %>%  # Remove intercept
+  kable(
+    digits  = 2,
+    caption = "Full multinomial model: Stage at diagnosis ~ Race/ethnicity + covariates (RRRs)"
+  ) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"))
+```
+
+
+```{r}
+# Using gtsummary 
+publication_table <- tbl_regression(
+  fit_full,
+  exponentiate = TRUE,
+  label = list(
+    race_eth    ~ "Race and Ethnicity",
+    age_group   ~ "Age Group (years)",
+    grade_cat   ~ "Tumor Grade",
+    er_status   ~ "Estrogen Receptor Status",
+    pr_status   ~ "Progesterone Receptor Status",
+    her2_status ~ "HER2 Status",
+    income_cat  ~ "Median Household Income",
+    rural_urban ~ "Urban-Rural Classification",
+    marital_cat ~ "Marital Status",
+    year_dx     ~ "Year of Diagnosis"
+  )
+) %>%
+  
+  # Customize headers
+  modify_header(
+    label = "**Characteristic**",
+    estimate = "**RRR**",
+    ci = "**95% CI**",
+    p.value = "**P-value**"
+  ) %>%
+  # Add caption and footnotes
+  modify_caption("**Table 2. Multinomial Logistic Regression Analysis of Stage at Diagnosis**") %>%
+  modify_footnote(
+    estimate ~ "RRR = Relative Risk Ratio; Reference categories: Non-Hispanic White, Age 18-39, Low Grade tumor, ER Negative, PR Negative, HER2 Negative or Equivocal, Income <$80,000, Urban residence, Married or Partnered",
+    abbreviation = TRUE
+  ) %>%
+  # Bold labels and significant p-values
+  bold_labels() %>%
+  bold_p(t = 0.05) %>%
+  # Italicize levels
+  italicize_levels()
+
+publication_table
+
+```
+
+
+```{r full_mlr_race_only, message=FALSE, warning=FALSE}
+# Option 1: Using gtsummary - Focus on race/ethnicity only
+race_publication_table <- tbl_regression(
+  fit_full,
+  exponentiate = TRUE,
+  include = race_eth,  # Only show race/ethnicity
+  label = list(
+    race_eth ~ "Race and Ethnicity"
+  )
+) %>%
+ 
+  # Customize headers
+  modify_header(
+    label = "**Race and Ethnicity**",
+    estimate = "**RRR**",
+    ci = "**95% CI**",
+    p.value = "**P-value**"
+  ) %>%
+  # Add caption
+  modify_caption("**Table 3. Association Between Race/Ethnicity and Stage at Diagnosis**") %>%
+  # Add footnotes
+  modify_footnote(
+    estimate ~ "RRR = Relative Risk Ratio; Reference: Non-Hispanic White, Localized stage",
+    ci ~ "Adjusted for age, tumor grade, ER/PR/HER2 status, income, rural/urban status, marital status, and year of diagnosis"
+  ) %>%
+  # Bold labels and significant p-values
+  bold_labels() %>%
+  bold_p(t = 0.05) %>%
+  # Italicize race/ethnicity levels
+  italicize_levels()
+
+race_publication_table
+
+library(gtsummary)
+library(gt)
+library(htmltools)
+
+output_folder <- "C:/Users/Admin/Desktop/ADA"
+
+file_path_html <- file.path(output_folder, "race_publication_table_editable.html")
+
+# Convert to gt, then save as HTML
+as_gt(race_publication_table) %>%
+  gt::gtsave(filename = file_path_html)
+
+```
+
+```{r model_comparison, message=FALSE, warning=FALSE}
+# Compare basic vs full model
+aic_comparison <- data.frame(
+  Model = c("Basic (race only)", "Full (adjusted)"),
+  AIC = c(AIC(fit_basic), AIC(fit_full)),
+  df = c(attr(logLik(fit_basic), "df"), 
+         attr(logLik(fit_full), "df")),
+  LogLik = c(as.numeric(logLik(fit_basic)), 
+             as.numeric(logLik(fit_full)))
+) %>%
+  mutate(
+    Delta_AIC = AIC - min(AIC)
+  )
+
+aic_comparison %>%
+  kable(
+    digits = 1,
+    caption = "Model comparison: Basic vs Full multinomial model",
+    col.names = c("Model", "AIC", "df", "Log-Likelihood", "Δ AIC")
+  ) %>%
+  kable_styling(full_width = FALSE)
+```
+```{r model_summary, message=FALSE, warning=FALSE}
+# Print model summary statistics
+cat("=== FULL MODEL SUMMARY ===\n\n")
+cat("Sample size:", nrow(bc_model), "\n")
+cat("Number of predictors:", length(coef(fit_full)[1,]) - 1, "\n\n")
+
+cat("Model fit statistics:\n")
+cat("AIC:", round(AIC(fit_full), 1), "\n")
+cat("Residual Deviance:", round(deviance(fit_full), 1), "\n")
+cat("Log-Likelihood:", round(as.numeric(logLik(fit_full)), 1), "\n\n")
+
+cat("Stage distribution:\n")
+print(table(bc_model$stage3))
+```
+#Data viz
+```{r plot_grouped_bar, message=FALSE, warning=FALSE, fig.width=12, fig.height=6}
+# Grouped bar chart: Easier comparison across stages
+p2 <- bc_model %>%
+  count(race_eth, stage3) %>%
+  group_by(race_eth) %>%
+  mutate(prop = n / sum(n) * 100) %>%
+  ggplot(aes(x = race_eth, y = prop, fill = stage3)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(aes(label = sprintf("%.1f%%", prop)),
+            position = position_dodge(width = 0.9),
+            vjust = -0.5, size = 3) +
+  scale_fill_manual(
+    values = c("Localized" = "#2E7D32", 
+               "Regional" = "#F57C00", 
+               "Distant" = "#C62828")
+  ) +
+  labs(
+    title = "Stage at Diagnosis by Race/Ethnicity (Grouped Comparison)",
+    x = "Race and Ethnicity",
+    y = "Percentage (%)",
+    fill = "Stage at Diagnosis"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom"
+  ) +
+  ylim(0, 70)
+
+print(p2)
+ggsave("stage_by_race_grouped.png", p2, width = 12, height = 6, dpi = 300)
+```
+
+```{r plot3_forest_plot_basic, message=FALSE, warning=FALSE, fig.width=10, fig.height=8}
+# Forest plot: Basic model (unadjusted RRRs)
+library(forcats)
+
+forest_basic <- basic_rrr %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    term = str_replace(term, "race_eth", ""),
+    term = fct_inorder(term)
+  )
+
+p3 <- ggplot(forest_basic, aes(x = estimate, y = term, color = y.level)) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "gray50") +
+  geom_point(size = 3, position = position_dodge(width = 0.5)) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high),
+                 height = 0.2, position = position_dodge(width = 0.5)) +
+  scale_color_manual(
+    values = c("Regional" = "#F57C00", "Distant" = "#C62828")
+  ) +
+  scale_x_continuous(trans = "log10", breaks = c(0.5, 1, 1.5, 2, 2.5)) +
+  labs(
+    title = "Unadjusted Association: Race/Ethnicity and Stage at Diagnosis",
+    subtitle = "Reference: Non-Hispanic White, Localized stage",
+    x = "Relative Risk Ratio (RRR)",
+    y = "Race and Ethnicity",
+    color = "Comparison"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    panel.grid.minor = element_blank()
+  )
+
+print(p3)
+ggsave("forest_plot_basic.png", p3, width = 10, height = 8, dpi = 300)
+```
+
+
+```{r plot4_forest_plot_full, message=FALSE, warning=FALSE, fig.width=10, fig.height=8}
+# 4. Forest plot: Full model (adjusted RRRs) - Race/ethnicity only
+forest_full <- full_rrr %>%
+  filter(str_detect(term, "race_eth")) %>%
+  mutate(
+    term = str_replace(term, "race_eth", ""),
+    term = fct_inorder(term)
+  )
+
+p4 <- ggplot(forest_full, aes(x = estimate, y = term, color = y.level)) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "gray50") +
+  geom_point(size = 3, position = position_dodge(width = 0.5)) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high),
+                 height = 0.2, position = position_dodge(width = 0.5)) +
+  scale_color_manual(
+    values = c("Regional" = "#F57C00", "Distant" = "#C62828")
+  ) +
+  scale_x_continuous(trans = "log10", breaks = c(0.5, 1, 1.5, 2, 2.5)) +
+  labs(
+    title = "Adjusted Association: Race/Ethnicity and Stage at Diagnosis",
+    subtitle = "Adjusted for age, grade, receptor status, income, location, marital status, and year\nReference: Non-Hispanic White, Localized stage",
+    x = "Relative Risk Ratio (RRR)",
+    y = "Race and Ethnicity",
+    color = "Comparison"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    panel.grid.minor = element_blank()
+  )
+
+print(p4)
+ggsave("forest_plot_adjusted.png", p4, width = 10, height = 8, dpi = 300)
+
+# Folder where you want to save it
+output_folder <- "C:/Users/Admin/Desktop/ADA"
+
+if (!dir.exists(output_folder)) {
+  dir.create(output_folder, recursive = TRUE)
+}
+
+# Full path to the PNG
+file_path <- file.path(output_folder, "forest_plot_adjusted.png")
+
+# Save the plot there
+ggsave(
+  filename = file_path,
+  plot     = p4,
+  width    = 10,
+  height   = 8,
+  dpi      = 300
+)
+
+```
+
+
+```{r plot5_comparison_basic_vs_full, message=FALSE, warning=FALSE, fig.width=12, fig.height=8}
+# 5. Side-by-side comparison: Unadjusted vs Adjusted
+comparison_data <- bind_rows(
+  basic_rrr %>% 
+    filter(str_detect(term, "race_eth")) %>%
+    mutate(model = "Unadjusted", term = str_replace(term, "race_eth", "")),
+  full_rrr %>% 
+    filter(str_detect(term, "race_eth")) %>%
+    mutate(model = "Adjusted", term = str_replace(term, "race_eth", ""))
+)
+
+p5 <- ggplot(comparison_data, aes(x = estimate, y = term, color = model)) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "gray50") +
+  geom_point(size = 3, position = position_dodge(width = 0.5)) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high),
+                 height = 0.2, position = position_dodge(width = 0.5)) +
+  scale_color_manual(
+    values = c("Unadjusted" = "#1976D2", "Adjusted" = "#D32F2F")
+  ) +
+  scale_x_continuous(trans = "log10", breaks = c(0.5, 1, 1.5, 2, 2.5, 3)) +
+  facet_wrap(~y.level, ncol = 1) +
+  labs(
+    title = "Comparison of Unadjusted vs Adjusted RRRs",
+    subtitle = "Effect of race/ethnicity on stage at diagnosis",
+    x = "Relative Risk Ratio (RRR)",
+    y = "Race and Ethnicity",
+    color = "Model"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold", size = 11)
+  )
+
+print(p5)
+ggsave("comparison_unadjusted_adjusted.png", p5, width = 12, height = 8, dpi = 300)
+```
+
+```{r}
+library(car)
+
+lm_dummy <- lm(as.numeric(stage3) ~ race_eth + age_group + year_dx +
+                 grade_cat + er_status + pr_status + her2_status +
+                 income_cat + rural_urban + marital_cat,
+               data = bc_model)
+
+vif(lm_dummy)
+
+```
+# key assumptions
+ - Independent observations: each woman contributes one record (Patient ID)
+# - Outcome coding: stage  has 3 mutually exclusive categories (Localized, Regional, Distant);
+#   in situ/benign cases were excluded.
+# - Model form: stage treated as nominal; multinomial logit used instead of ordinal logit
+#   to avoid the proportional odds assumption.
+# - Multicollinearity: checked via GVIF using dummy; all GVIF < 1.5, indicating no serious collinearity.
+# - Cell counts: stage by predictors showed no sparse cells,
+#   so complete separation is unlikely.
+# - Missing data: records with missing exposure/outcome were excluded; covariate missingness
+#   handled with explicit "Unknown" categories 
+# - Confounding: adjustment set chosen from DAG; assumes no major unmeasured confounders
+#   of race/ethnicity–stage beyond modeled tumor and contextual factors.
+
