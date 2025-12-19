@@ -849,3 +849,248 @@ vif(lm_dummy)
 # - Confounding: adjustment set chosen from DAG; assumes no major unmeasured confounders
 #   of race/ethnicity–stage beyond modeled tumor and contextual factors.
 
+```{r two_separate_forest_plots, message=FALSE, warning=FALSE, fig.width=8, fig.height=5}
+pacman::p_load(dplyr, stringr, forcats, broom, ggplot2)
+
+# 1) Create clean abbreviations for modeling
+bc_model2 <- bc_model %>%
+  mutate(
+    race_abbr = case_when(
+      race_eth == "Non-Hispanic White" ~ "NHW",
+      race_eth == "Non-Hispanic Black" ~ "NHB",
+      race_eth == "Non-Hispanic American Indian/Alaska Native" ~ "NH_AIAN",
+      race_eth == "Non-Hispanic Asian or Pacific Islander" ~ "NH_API",
+      race_eth == "Hispanic (All Races)" ~ "Hispanic",
+      TRUE ~ NA_character_
+    ),
+    race_abbr = factor(race_abbr, levels = c("NHW","NHB","NH_AIAN","NH_API","Hispanic"))
+  )
+
+# Helper to extract ORs for race_abbr (reference NHW not returned by glm)
+get_or_race <- function(fit){
+  broom::tidy(fit, exponentiate = TRUE, conf.int = TRUE) %>%
+    filter(str_detect(term, "^race_abbr")) %>%
+    mutate(
+      group = str_remove(term, "^race_abbr"),
+      group = factor(group, levels = c("Hispanic","NH_API","NH_AIAN","NHB"))
+    ) %>%
+    filter(!is.na(group))
+}
+
+# 2) Regional vs Localized
+dat_reg <- bc_model2 %>%
+  filter(stage3 %in% c("Localized","Regional")) %>%
+  mutate(y = if_else(stage3 == "Regional", 1, 0))
+
+fit_reg <- glm(
+  y ~ race_abbr + age_group + grade_cat +
+    er_status + pr_status + her2_status +
+    income_cat + rural_urban + marital_cat + year_dx,
+  data = dat_reg, family = binomial()
+)
+
+or_reg <- get_or_race(fit_reg)
+
+legend_reg <- str_wrap(
+  "Figure legend: Odds ratios from adjusted logistic regression comparing Regional vs Localized. Reference race/ethnicity: NHW. Abbreviations: NH API = Non-Hispanic Asian/Pacific Islander; NH AIAN = Non-Hispanic American Indian/Alaska Native; NHB = Non-Hispanic Black; NHW = Non-Hispanic White.",
+  width = 95
+)
+
+p_reg <- ggplot(or_reg, aes(x = estimate, y = group)) +
+  geom_vline(xintercept = 1, linetype = "dashed") +
+  geom_point(size = 2.8) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0.2) +
+  scale_x_continuous(trans = "log10") +
+  scale_y_discrete(labels = c(
+    "Hispanic" = "Hispanic",
+    "NH_API"   = "NH API",
+    "NH_AIAN"  = "NH AIAN",
+    "NHB"      = "NHB"
+  )) +
+  labs(
+    title = "Regional vs Localized",
+    x = "OR (95% CI)",
+    y = NULL,
+    caption = legend_reg
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid.minor = element_blank(),
+    plot.caption = element_text(hjust = 0, size = 9),
+    plot.margin = margin(10, 10, 25, 10)
+  )
+
+p_reg
+ggsave("Figure_Regional_vs_Localized_OR.png", p_reg, width = 8, height = 5, dpi = 300)
+
+# 3) Distant vs Localized
+dat_dis <- bc_model2 %>%
+  filter(stage3 %in% c("Localized","Distant")) %>%
+  mutate(y = if_else(stage3 == "Distant", 1, 0))
+
+fit_dis <- glm(
+  y ~ race_abbr + age_group + grade_cat +
+    er_status + pr_status + her2_status +
+    income_cat + rural_urban + marital_cat + year_dx,
+  data = dat_dis, family = binomial()
+)
+
+or_dis <- get_or_race(fit_dis)
+
+legend_dis <- str_wrap(
+  "Figure legend: Odds ratios from adjusted logistic regression comparing Distant vs Localized. Reference race/ethnicity: NHW. Abbreviations: NH API = Non-Hispanic Asian/Pacific Islander; NH AIAN = Non-Hispanic American Indian/Alaska Native; NHB = Non-Hispanic Black; NHW = Non-Hispanic White.",
+  width = 95
+)
+
+p_dis <- ggplot(or_dis, aes(x = estimate, y = group)) +
+  geom_vline(xintercept = 1, linetype = "dashed") +
+  geom_point(size = 2.8) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0.2) +
+  scale_x_continuous(trans = "log10") +
+  scale_y_discrete(labels = c(
+    "Hispanic" = "Hispanic",
+    "NH_API"   = "NH API",
+    "NH_AIAN"  = "NH AIAN",
+    "NHB"      = "NHB"
+  )) +
+  labs(
+    title = "Distant vs Localized",
+    x = "OR (95% CI)",
+    y = NULL,
+    caption = legend_dis
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid.minor = element_blank(),
+    plot.caption = element_text(hjust = 0, size = 9),
+    plot.margin = margin(10, 10, 25, 10)
+  )
+
+p_dis
+ggsave("Figure_Distant_vs_Localized_OR.png", p_dis, width = 8, height = 5, dpi = 300)
+
+
+```
+
+
+```{r figure1_flow_seer_selection_plus_exclusions, message=FALSE, warning=FALSE, fig.width=11, fig.height=7}
+pacman::p_load(dplyr, DiagrammeR, janitor, readr)
+
+escape_dot <- function(x) gsub("'", "\\\\'", x)
+
+# Start from the SEER extract 
+# females + first primary invasive + known stage + known race/eth + known ER/PR/HER2
+d0 <- bc_raw %>% janitor::clean_names()
+n0 <- nrow(d0)
+
+# Age filtering 
+d0 <- d0 %>% mutate(age_num = readr::parse_number(age_recode_with_single_ages_and_85))
+n_under18 <- sum(d0$age_num < 18, na.rm = TRUE)
+
+# drops missing age when filtering
+d1 <- d0 %>% filter(!is.na(age_num), age_num >= 18)
+n1 <- nrow(d1)
+
+# Grade in-situ exclusion (L/M/H)
+d1 <- d1 %>% mutate(
+  grade_raw    = derived_summary_grade_2018_2018,
+  grade_insitu = grade_raw %in% c("L","M","H")
+)
+n_insitu <- sum(d1$grade_insitu, na.rm = TRUE)
+
+d2 <- d1 %>% filter(!grade_insitu)
+n2 <- nrow(d2)
+
+# If you want to show micro-confirmation 
+d2 <- d2 %>%
+  mutate(
+    micro_confirm = diagnostic_confirmation %in% c(
+      "Microscopically confirmed",
+      "Positive histology",
+      "Positive exfoliative cytology, no positive histology",
+      "Pos hist AND immunophenotyping AND/OR pos genetic studies",
+      "Positive microscopic confirm, method not specified"
+    )
+  )
+n_not_micro <- sum(!d2$micro_confirm, na.rm = TRUE)
+
+d3 <- d2 %>% filter(micro_confirm)
+n3 <- nrow(d3)
+
+
+# use bc_model is as the official final sample:
+n_final <- nrow(bc_model)
+
+# Build flowchart nodes dynamically 
+nodes <- c(
+  sprintf("A [label='SEER extracted cohort\\nFemale; first primary invasive breast cancer; known stage; known race/ethnicity; known ER/PR/HER2\\nN = %s']", n0)
+)
+edges <- c()
+last  <- "A"
+
+# Age <18 (show only if >0)
+if (n_under18 > 0) {
+  nodes <- c(nodes,
+    sprintf("B [label='Excluded: age < 18\\n(n = %s)']", n_under18),
+    sprintf("C [label='Age >= 18\\nN = %s']", n1)
+  )
+  edges <- c(edges, "A -> B -> C")
+  last <- "C"
+} else {
+  # If 0, still keep the cohort moving forward without showing boxes
+  last <- "A"
+}
+
+# Grade in-situ 
+if (n_insitu > 0) {
+  nodes <- c(nodes,
+    sprintf("D [label='Excluded: in-situ nuclear grade (L/M/H)\\n(n = %s)']", n_insitu),
+    sprintf("E [label='After grade exclusion\\nN = %s']", n2)
+  )
+  edges <- c(edges, sprintf("%s -> D -> E", last))
+  last <- "E"
+}
+
+# Micro-confirm 
+if (n_not_micro > 0) {
+  nodes <- c(nodes,
+    sprintf("F [label='Excluded: not microscopically confirmed\\n(n = %s)']", n_not_micro),
+    sprintf("G [label='Microscopically confirmed\\nN = %s']", n3)
+  )
+  edges <- c(edges, sprintf("%s -> F -> G", last))
+  last <- "G"
+}
+
+# Final box
+nodes <- c(nodes, sprintf("H [label='Final analytic sample\\nN = %s']", n_final))
+edges <- c(edges, sprintf("%s -> H", last))
+
+note_txt <- escape_dot("Note: Income, rural/urban residence, and marital status were retained using an Unknown category (no exclusions for these covariates).")
+nodes <- c(nodes, sprintf("I [shape=note, fillcolor='white', label='%s']", note_txt))
+edges <- c(edges, "H -> I [style=dashed, color='gray50']")
+
+dot <- sprintf("
+digraph flow {
+  graph [layout = dot, rankdir = TB]
+  node [shape=box, style='rounded,filled', fillcolor='gray95', color='gray40', fontname=Helvetica]
+
+  %s
+
+  %s
+}
+", paste(nodes, collapse = "\n  "), paste(edges, collapse = "\n  "))
+
+flow_plot <- DiagrammeR::grViz(dot)
+flow_plot
+
+```
+
+```{r}
+# ---- Export to image (PNG/PDF) ----
+svg <- DiagrammeRsvg::export_svg(flow_plot)
+
+# PNG 
+rsvg::rsvg_png(charToRaw(svg), file = "Figure_1_Flowchart.png", width = 1600)
+
+```
+
