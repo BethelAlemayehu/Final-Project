@@ -1086,11 +1086,12 @@ flow_plot
 ```
 
 ```{r}
-# ---- Export to image (PNG/PDF) ----
+# Export to image (PNG/PDF) 
 svg <- DiagrammeRsvg::export_svg(flow_plot)
 
 # PNG 
 rsvg::rsvg_png(charToRaw(svg), file = "Figure_1_Flowchart.png", width = 1600)
 
 ```
+
 
